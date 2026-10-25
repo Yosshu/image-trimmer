@@ -23,11 +23,13 @@ import {
   History,
   imageSize,
   initialState,
+  canZoomOut,
   rotateQuarter,
   sameState,
   selectRatio,
   setAngle,
   withCrop,
+  zoom,
 } from './state';
 
 /** 画面の配置（CSS px）。docs/SPEC.md §1 */
@@ -54,6 +56,12 @@ const ROTATE_DURATION = 250;
 const PILL_DURATION = 1500;
 
 const easeOut = (t: number): number => 1 - Math.pow(1 - t, 3);
+
+/** ズームボタン 1 回の倍率 */
+const ZOOM_STEP = 1.25;
+const ZOOM_DURATION = 150;
+/** ホイールでのズームを 1 回の操作としてまとめる間隔 */
+const WHEEL_COMMIT_DELAY = 300;
 
 type DragTarget = Handle | 'pan';
 
@@ -100,6 +108,7 @@ export class Editor {
   /** この時刻（performance.now）まで、サイズと比率のラベルを出す */
   private pillsUntil = 0;
   private pillsTimer = 0;
+  private wheelTimer = 0;
 
   private ui!: {
     zoomIn: HTMLButtonElement;
@@ -141,6 +150,7 @@ export class Editor {
     this.bindCanvas();
 
     window.addEventListener('resize', this.onResize);
+    window.addEventListener('keydown', this.onKeyDown);
     this.colorScheme.addEventListener('change', this.requestRender);
   }
 
@@ -156,7 +166,9 @@ export class Editor {
     cancelAnimationFrame(this.raf);
     cancelAnimationFrame(this.animation);
     clearTimeout(this.pillsTimer);
+    clearTimeout(this.wheelTimer);
     window.removeEventListener('resize', this.onResize);
+    window.removeEventListener('keydown', this.onKeyDown);
     this.colorScheme.removeEventListener('change', this.requestRender);
     this.el.remove();
   }
@@ -185,6 +197,11 @@ export class Editor {
     ]);
     const cancel = h('button', { class: 'btn-standard cancel-button', type: 'button', text: 'キャンセル' });
     cancel.addEventListener('click', () => this.callbacks.onCancel());
+    zoomIn.addEventListener('click', () => this.zoomBy(ZOOM_STEP));
+    zoomOut.addEventListener('click', () => this.zoomBy(1 / ZOOM_STEP));
+    reset.addEventListener('click', () => this.apply(initialState(this.src), false));
+    undo.addEventListener('click', () => this.undo());
+    redo.addEventListener('click', () => this.redo());
 
     const toolbar = h('div', { class: 'toolbar' }, [
       h('div', { class: 'tool-group' }, [
@@ -442,6 +459,67 @@ export class Editor {
       canvas.addEventListener('pointercancel', end);
       this.update();
     });
+
+    // ホイール：ズームイン／ズームアウトと同じ。続けて回した分は 1 回の操作にまとめる
+    canvas.addEventListener(
+      'wheel',
+      (e) => {
+        e.preventDefault();
+        if (this.dragging) return;
+        this.stopAnimation();
+        const delta = e.deltaMode === 1 ? e.deltaY * 33 : e.deltaY;
+        let factor = Math.exp(-delta * 0.002);
+        if (factor > 1) factor = Math.min(factor, this.maxZoomFactor());
+        if (factor > 1 + 1e-6 || (factor < 1 && canZoomOut(this.state, this.src))) {
+          this.preview(zoom(this.state, this.src, factor));
+          this.flashPills();
+        }
+        clearTimeout(this.wheelTimer);
+        this.wheelTimer = window.setTimeout(() => this.commit(), WHEEL_COMMIT_DELAY);
+      },
+      { passive: false },
+    );
+
+    // 矢印キー：枠を動かす（後ろの画像が逆向きにスライドする）。Shift と一緒なら右辺・下辺を動かして大きさを変える
+    canvas.tabIndex = 0;
+    canvas.setAttribute('aria-label', 'ハンドルをドラッグするか、矢印キーを使用して画像をトリミングします');
+    canvas.addEventListener('focus', this.requestRender);
+    canvas.addEventListener('blur', this.requestRender);
+    let keyStart: Crop | null = null;
+    const arrow = (e: KeyboardEvent): { x: number; y: number } | null => {
+      const n = e.ctrlKey ? 10 : 1;
+      if (e.key === 'ArrowLeft') return { x: -n, y: 0 };
+      if (e.key === 'ArrowRight') return { x: n, y: 0 };
+      if (e.key === 'ArrowUp') return { x: 0, y: -n };
+      if (e.key === 'ArrowDown') return { x: 0, y: n };
+      return null;
+    };
+    canvas.addEventListener('keydown', (e) => {
+      const d = arrow(e);
+      if (!d) return;
+      e.preventDefault();
+      e.stopPropagation();
+      this.stopAnimation();
+      const crop = effectiveCrop(this.state, this.src);
+      keyStart ??= crop;
+      const f = this.view.f;
+      const img = imageSize(this.state, this.src);
+      if (e.shiftKey) {
+        const handle: Handle = d.x !== 0 ? 'e' : 's';
+        const next = dragHandle(crop, handle, { x: d.x / f, y: d.y / f }, this.dragOptions(crop, this.view));
+        this.state = withCrop(this.state, next);
+        this.update();
+      } else {
+        this.preview(withCrop(this.state, panCrop(crop, { x: -d.x / f, y: -d.y / f }, img, this.state.angle)));
+      }
+    });
+    canvas.addEventListener('keyup', (e) => {
+      if (!arrow(e) && e.key !== 'Shift') return;
+      if (!keyStart) return;
+      keyStart = null;
+      this.commit();
+      this.animateTo(this.fitView(this.state));
+    });
   }
 
   /** ハンドルのドラッグの制限：画像の内側、画面の見えている範囲、最小サイズ */
@@ -550,6 +628,72 @@ export class Editor {
     this.animation = requestAnimationFrame(step);
   }
 
+  /** 今よりどれだけ拡大できるか（ズームの上限まで） */
+  private maxZoomFactor(): number {
+    const dpr = window.devicePixelRatio || 1;
+    const f = fitScale(effectiveCrop(this.state, this.src), this.stageRect());
+    return MAX_ZOOM / dpr / f;
+  }
+
+  /** ズーム：枠の画面上の大きさは変えず、後ろの画像を拡大・縮小する */
+  private zoomBy(factor: number): void {
+    this.stopAnimation();
+    const start = this.history.current;
+    const target = factor > 1 ? Math.min(factor, this.maxZoomFactor()) : factor;
+    if (target > 1 && target <= 1 + 1e-6) return;
+    if (target < 1 && !canZoomOut(start, this.src)) return;
+    this.flashPills();
+    const t0 = performance.now();
+    const step = (now: number) => {
+      const t = Math.min(1, (now - t0) / ZOOM_DURATION);
+      const k = easeOut(t);
+      this.state = zoom(start, this.src, Math.pow(target, k));
+      this.view = this.fitView(this.state);
+      if (t < 1) {
+        this.update();
+        this.animation = requestAnimationFrame(step);
+      } else {
+        this.animation = 0;
+        this.commit();
+      }
+    };
+    this.animation = requestAnimationFrame(step);
+  }
+
+  private undo(): void {
+    this.stopAnimation();
+    this.state = this.history.undo();
+    this.view = this.fitView(this.state);
+    this.update();
+  }
+
+  private redo(): void {
+    this.stopAnimation();
+    this.state = this.history.redo();
+    this.view = this.fitView(this.state);
+    this.update();
+  }
+
+  private onKeyDown = (e: KeyboardEvent): void => {
+    const ctrl = e.ctrlKey || e.metaKey;
+    const key = e.key.toLowerCase();
+    if (ctrl && key === 'z' && !e.shiftKey) {
+      e.preventDefault();
+      this.undo();
+    } else if (ctrl && (key === 'y' || (key === 'z' && e.shiftKey))) {
+      e.preventDefault();
+      this.redo();
+    } else if (ctrl && (key === '+' || key === '=' || key === ';')) {
+      e.preventDefault();
+      this.zoomBy(ZOOM_STEP);
+    } else if (ctrl && key === '-') {
+      e.preventDefault();
+      this.zoomBy(1 / ZOOM_STEP);
+    } else if (key === 'escape' && this.mode === 'ratio') {
+      this.setMode('angle');
+    }
+  };
+
   private flipImage(axis: 'h' | 'v'): void {
     this.apply(flip(this.history.current, axis), false);
   }
@@ -616,6 +760,8 @@ export class Editor {
 
     ui.zoomValue.textContent = `${Math.round(this.view.f * dpr * 100)}%`;
     ui.actualSize.disabled = true;
+    ui.zoomIn.disabled = this.maxZoomFactor() <= 1 + 1e-6;
+    ui.zoomOut.disabled = !canZoomOut(this.state, this.src);
     ui.reset.disabled = sameState(this.history.current, initialState(this.src));
     ui.undo.disabled = !this.history.canUndo;
     ui.redo.disabled = !this.history.canRedo;
@@ -758,6 +904,14 @@ export class Editor {
     ctx.rect(x1, cy - half, t, half * 2);
     ctx.fill();
     ctx.restore();
+
+    // キーボードで枠にフォーカスしたときの枠
+    if (this.canvas.matches(':focus-visible')) {
+      const g = t + 3;
+      ctx.strokeStyle = css.getPropertyValue('--focus').trim();
+      ctx.lineWidth = 2;
+      ctx.strokeRect(x0 - g, y0 - g, x1 - x0 + g * 2, y1 - y0 + g * 2);
+    }
 
     ctx.restore();
 

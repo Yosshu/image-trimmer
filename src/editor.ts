@@ -3,8 +3,8 @@ import { cropRectOut, fitScale, type Rect, roundHalfEven, type Size, toRad } fro
 import { ICONS, icon, ratioIcon } from './icons';
 import type { SourceImage } from './loader';
 import { RATIOS, ratioDef } from './ratios';
-import { drawRuler } from './ruler';
-import { effectiveCrop, type EditState, History, imageSize, initialState, sameState } from './state';
+import { drawRuler, PX_PER_DEG } from './ruler';
+import { effectiveCrop, type EditState, History, imageSize, initialState, sameState, setAngle } from './state';
 
 /** 画面の配置（CSS px）。docs/SPEC.md §1 */
 const TOOLBAR_H = 52;
@@ -185,6 +185,7 @@ export class Editor {
     const picker = h('div', { class: 'ratio-picker', hidden: true }, [list, done]);
     ratioButton.addEventListener('click', () => this.setMode('ratio'));
     done.addEventListener('click', () => this.setMode('angle'));
+    this.bindRuler(ruler);
 
     this.ui = {
       zoomIn,
@@ -213,6 +214,68 @@ export class Editor {
     };
 
     return [sizePill, ratioPill, anglePanel, picker, toolbar];
+  }
+
+  // ===== 操作 =====
+
+  /** 操作の途中の状態を表示する（履歴にはまだ積まない） */
+  private preview(state: EditState): void {
+    this.state = state;
+    this.view = this.fitView(state);
+    this.update();
+  }
+
+  /** 表示中の状態を確定して履歴に積む */
+  private commit(): void {
+    this.history.push(this.state);
+    this.state = this.history.current;
+    this.update();
+  }
+
+  /**
+   * 角度スライダー：つまみは中央に固定で、目盛りのテープをドラッグする。
+   * テープを左に動かすと値が大きくなる（0 がつまみの左へ流れる）。
+   */
+  private bindRuler(ruler: HTMLElement): void {
+    ruler.addEventListener('pointerdown', (e) => {
+      if (e.button !== 0) return;
+      e.preventDefault();
+      // マウスで触ったときはフォーカス枠を出さない（方向キーはそのまま使えるようにする）
+      ruler.focus({ preventScroll: true, focusVisible: false } as FocusOptions);
+      ruler.setPointerCapture(e.pointerId);
+      const startX = e.clientX;
+      const startAngle = this.state.angle;
+      const move = (ev: PointerEvent) => {
+        this.preview(setAngle(this.state, startAngle - (ev.clientX - startX) / PX_PER_DEG));
+      };
+      const end = () => {
+        ruler.removeEventListener('pointermove', move);
+        ruler.removeEventListener('pointerup', end);
+        ruler.removeEventListener('pointercancel', end);
+        this.commit();
+      };
+      ruler.addEventListener('pointermove', move);
+      ruler.addEventListener('pointerup', end);
+      ruler.addEventListener('pointercancel', end);
+    });
+
+    // 方向キー：1 回で 1°、Shift と一緒に押すと 0.1°。押し続けた分はまとめて 1 回の操作にする
+    const keyStep = (e: KeyboardEvent): number => {
+      const step = e.shiftKey ? 0.1 : 1;
+      if (e.key === 'ArrowRight' || e.key === 'ArrowUp') return step;
+      if (e.key === 'ArrowLeft' || e.key === 'ArrowDown') return -step;
+      return 0;
+    };
+    ruler.addEventListener('keydown', (e) => {
+      const step = keyStep(e);
+      if (!step) return;
+      e.preventDefault();
+      this.preview(setAngle(this.state, this.state.angle + step));
+    });
+    ruler.addEventListener('keyup', (e) => {
+      if (keyStep(e)) this.commit();
+    });
+    ruler.addEventListener('blur', () => this.commit());
   }
 
   private setMode(mode: 'angle' | 'ratio'): void {

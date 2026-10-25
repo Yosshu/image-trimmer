@@ -4,6 +4,7 @@ import {
   canGrow,
   type Crop,
   cropFits,
+  cropPixelRect,
   cropRectOut,
   dragHandle,
   fitScale,
@@ -247,6 +248,22 @@ describe('ハンドルのドラッグ', () => {
     const c = dragHandle(start, 'n', { x: 0, y: -100 }, { ...opts, bounds });
     expect(cropRectOut(c, 0).y).toBeCloseTo(-150, 3);
     expect(cropRectOut(c, 0).y + c.h).toBeCloseTo(100, 6);
+  });
+});
+
+describe('書き出す範囲（傾き補正なし）', () => {
+  it('画像全体', () => {
+    expect(cropPixelRect(FULL, IMG)).toEqual({ x: 0, y: 0, w: 422, h: 717 });
+  });
+
+  it('16:9 は 422 x 237 で、上下の中央', () => {
+    const r = cropPixelRect(applyRatio(FULL, 16 / 9, IMG, 0), IMG);
+    expect(r).toEqual({ x: 0, y: 240, w: 422, h: 237 });
+  });
+
+  it('画像の外にはみ出さない', () => {
+    const r = cropPixelRect({ u: 211 - 50.4, v: 0, w: 100.8, h: 100 }, IMG);
+    expect(r.x + r.w).toBeLessThanOrEqual(422);
   });
 });
 

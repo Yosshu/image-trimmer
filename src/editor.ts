@@ -1,4 +1,5 @@
 import { h } from './dom';
+import { copyToClipboard, defaultSaveTarget, download, exportBlob, getSaveFilePicker, saveWithPicker } from './export';
 import {
   type Crop,
   cropCenterOut,
@@ -16,6 +17,7 @@ import { ICONS, icon, ratioIcon } from './icons';
 import type { SourceImage } from './loader';
 import { RATIOS, ratioDef, ratioValue } from './ratios';
 import { drawRuler, PX_PER_DEG } from './ruler';
+import { showSaveDialog } from './saveDialog';
 import {
   effectiveCrop,
   type EditState,
@@ -191,7 +193,12 @@ export class Editor {
     const undo = iconButton(ICONS.undo, 16, '元に戻す', 'undo');
     const redo = iconButton(ICONS.redo, 16, 'やり直し', 'redo');
 
-    const save = h('button', { class: 'btn-accent save-button', type: 'button', 'aria-haspopup': 'menu' }, [
+    const save = h('button', {
+      class: 'btn-accent save-button',
+      type: 'button',
+      'aria-haspopup': 'menu',
+      'aria-expanded': 'false',
+    }, [
       h('span', { text: '保存オプション' }),
       icon(ICONS.chevronDown, 12),
     ]);
@@ -214,7 +221,7 @@ export class Editor {
         undo,
         redo,
       ]),
-      h('div', { class: 'actions' }, [save, cancel]),
+      h('div', { class: 'actions' }, [save, cancel, this.buildSaveMenu(save)]),
     ]);
 
     const sizePill = h('div', { class: 'pill', hidden: true });
@@ -701,6 +708,102 @@ export class Editor {
   private setMode(mode: 'angle' | 'ratio'): void {
     this.mode = mode;
     this.update();
+  }
+
+  // ===== 保存 =====
+
+  /** 「保存オプション」のメニュー */
+  private buildSaveMenu(button: HTMLButtonElement): HTMLElement {
+    const saveCopy = h('button', { class: 'menu-item', type: 'button', role: 'menuitem', text: 'コピーとして保存' });
+    const copy = h('button', {
+      class: 'menu-item',
+      type: 'button',
+      role: 'menuitem',
+      text: 'クリップボードにコピー',
+      'data-tooltip': '画像をクリップボードにコピーします',
+    });
+    const menu = h('div', { class: 'menu', role: 'menu', hidden: true }, [saveCopy, copy]);
+    const items = [saveCopy, copy];
+
+    const close = () => {
+      if (menu.hidden) return;
+      menu.hidden = true;
+      button.setAttribute('aria-expanded', 'false');
+      document.removeEventListener('pointerdown', onOutside, true);
+    };
+    const onOutside = (e: PointerEvent) => {
+      if (!menu.contains(e.target as Node) && !button.contains(e.target as Node)) close();
+    };
+    const open = () => {
+      menu.hidden = false;
+      button.setAttribute('aria-expanded', 'true');
+      document.addEventListener('pointerdown', onOutside, true);
+    };
+
+    button.addEventListener('click', () => (menu.hidden ? open() : close()));
+    button.addEventListener('keydown', (e) => {
+      if (e.key === 'ArrowDown' && menu.hidden) {
+        e.preventDefault();
+        open();
+        items[0].focus();
+      }
+    });
+    menu.addEventListener('keydown', (e) => {
+      const i = items.indexOf(document.activeElement as HTMLButtonElement);
+      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+        e.preventDefault();
+        const next = (i + (e.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length;
+        items[next].focus();
+      } else if (e.key === 'Escape') {
+        e.stopPropagation();
+        close();
+        button.focus();
+      }
+    });
+    saveCopy.addEventListener('click', () => {
+      close();
+      void this.saveCopy();
+    });
+    copy.addEventListener('click', () => {
+      close();
+      void this.copy();
+    });
+    return menu;
+  }
+
+  /** コピーとして保存（名前を付けて保存） */
+  private async saveCopy(): Promise<void> {
+    const state = this.history.current;
+    try {
+      const picker = getSaveFilePicker();
+      if (picker) {
+        await saveWithPicker(picker, state, this.image);
+        return;
+      }
+      const target = await showSaveDialog(defaultSaveTarget(this.image));
+      if (!target) return;
+      download(await exportBlob(state, this.image, target.format), target.name);
+    } catch {
+      this.toast('保存できませんでした');
+    }
+  }
+
+  private async copy(): Promise<void> {
+    try {
+      await copyToClipboard(this.history.current, this.image);
+      this.toast('クリップボードにコピーしました');
+    } catch {
+      this.toast('クリップボードにコピーできませんでした');
+    }
+  }
+
+  /** 画面下部に短いお知らせを出す（Web 版独自） */
+  private toast(message: string): void {
+    this.el.querySelector('.toast')?.remove();
+    const el = h('div', { class: 'toast', role: 'status', text: message });
+    this.el.append(el);
+    setTimeout(() => el.classList.add('hide'), 2000);
+    setTimeout(() => el.remove(), 2400);
   }
 
   // ===== 配置 =====

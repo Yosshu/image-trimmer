@@ -310,6 +310,18 @@ export function dragHandle(start: Crop, handle: Handle, delta: Vec, opts: DragOp
 }
 
 /**
+ * 傾き補正がないときの、書き出す範囲（向きを変えた画像の左上を原点とする整数の px）。
+ * 位置と大きさを整数にそろえて、画素をそのまま書き出せるようにする。
+ */
+export function cropPixelRect(crop: Crop, img: Size): Rect {
+  const w = clamp(roundHalfEven(crop.w), 1, img.w);
+  const h = clamp(roundHalfEven(crop.h), 1, img.h);
+  const x = clamp(Math.round(crop.u - crop.w / 2 + img.w / 2), 0, img.w - w);
+  const y = clamp(Math.round(crop.v - crop.h / 2 + img.h / 2), 0, img.h - h);
+  return { x, y, w, h };
+}
+
+/**
  * 表示用の丸め（.NET の Math.Round と同じく、ちょうど .5 は偶数に丸める）。
  * 例：316.5 → 316、237.5 → 238
  */

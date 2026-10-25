@@ -19,10 +19,13 @@ import { drawRuler, PX_PER_DEG } from './ruler';
 import {
   effectiveCrop,
   type EditState,
+  flip,
   History,
   imageSize,
   initialState,
+  rotateQuarter,
   sameState,
+  selectRatio,
   setAngle,
   withCrop,
 } from './state';
@@ -45,6 +48,12 @@ const MIN_CROP_SCREEN = 48;
 const MAX_ZOOM = 16;
 /** 手を離したあと、枠を中央に戻すアニメーションの長さ */
 const FIT_DURATION = 250;
+/** 90° 回転のアニメーションの長さ */
+const ROTATE_DURATION = 250;
+/** 回転・比率の変更などのあと、サイズと比率のラベルを出しておく時間 */
+const PILL_DURATION = 1500;
+
+const easeOut = (t: number): number => 1 - Math.pow(1 - t, 3);
 
 type DragTarget = Handle | 'pan';
 
@@ -86,6 +95,11 @@ export class Editor {
   private raf = 0;
   private animation = 0;
   private lastRatio: string | null = null;
+  /** 90° 回転のアニメーション中、枠の中心を軸に追加で回す角度（度） */
+  private spin = 0;
+  /** この時刻（performance.now）まで、サイズと比率のラベルを出す */
+  private pillsUntil = 0;
+  private pillsTimer = 0;
 
   private ui!: {
     zoomIn: HTMLButtonElement;
@@ -141,6 +155,7 @@ export class Editor {
   destroy(): void {
     cancelAnimationFrame(this.raf);
     cancelAnimationFrame(this.animation);
+    clearTimeout(this.pillsTimer);
     window.removeEventListener('resize', this.onResize);
     this.colorScheme.removeEventListener('change', this.requestRender);
     this.el.remove();
@@ -233,6 +248,16 @@ export class Editor {
     const picker = h('div', { class: 'ratio-picker', hidden: true }, [list, done]);
     ratioButton.addEventListener('click', () => this.setMode('ratio'));
     done.addEventListener('click', () => this.setMode('angle'));
+    for (const [id, item] of ratioItems) {
+      item.addEventListener('click', () => this.chooseRatio(id as EditState['ratio']));
+    }
+    rotateCcw.addEventListener('click', () => this.rotate(-1));
+    rotateCw.addEventListener('click', () => this.rotate(1));
+    flipH.addEventListener('click', () => this.flipImage('h'));
+    flipV.addEventListener('click', () => this.flipImage('v'));
+    picker.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') this.setMode('angle');
+    });
     this.bindRuler(ruler);
 
     this.ui = {
@@ -471,6 +496,62 @@ export class Editor {
       cancelAnimationFrame(this.animation);
       this.animation = 0;
     }
+    if (this.spin) {
+      this.spin = 0;
+      this.view = this.fitView(this.state);
+    }
+  }
+
+  /** 確定した状態に移り、表示を合わせる */
+  private apply(next: EditState, animate: boolean): void {
+    this.stopAnimation();
+    this.history.push(next);
+    this.state = this.history.current;
+    if (animate) {
+      this.update();
+      this.animateTo(this.fitView(this.state));
+    } else {
+      this.view = this.fitView(this.state);
+      this.update();
+    }
+  }
+
+  /** サイズと比率のラベルをしばらく出す */
+  private flashPills(): void {
+    this.pillsUntil = performance.now() + PILL_DURATION;
+    clearTimeout(this.pillsTimer);
+    this.pillsTimer = window.setTimeout(() => this.requestRender(), PILL_DURATION + 20);
+  }
+
+  private chooseRatio(id: EditState['ratio']): void {
+    this.apply(selectRatio(this.history.current, this.src, id), true);
+  }
+
+  /** 90° 回転：画像と枠を一緒に回しながら、新しい大きさに合わせる */
+  private rotate(dir: 1 | -1): void {
+    this.stopAnimation();
+    const fromF = this.view.f;
+    this.history.push(rotateQuarter(this.history.current, dir));
+    this.state = this.history.current;
+    const target = this.fitView(this.state);
+    const pc = cropCenterOut(effectiveCrop(this.state, this.src), this.state.angle);
+    const center = { x: target.ox + target.f * pc.x, y: target.oy + target.f * pc.y };
+    this.flashPills();
+    const t0 = performance.now();
+    const step = (now: number) => {
+      const t = Math.min(1, (now - t0) / ROTATE_DURATION);
+      const k = easeOut(t);
+      const f = fromF * Math.pow(target.f / fromF, k);
+      this.spin = t < 1 ? -dir * 90 * (1 - k) : 0;
+      this.view = t < 1 ? { f, ox: center.x - f * pc.x, oy: center.y - f * pc.y } : target;
+      this.update();
+      this.animation = t < 1 ? requestAnimationFrame(step) : 0;
+    };
+    this.animation = requestAnimationFrame(step);
+  }
+
+  private flipImage(axis: 'h' | 'v'): void {
+    this.apply(flip(this.history.current, axis), false);
   }
 
   private setMode(mode: 'angle' | 'ratio'): void {
@@ -587,6 +668,16 @@ export class Editor {
     ctx.rect(0, TOOLBAR_H, W, H - TOOLBAR_H);
     ctx.clip();
 
+    // 90° 回転のアニメーション中は、枠の中心を軸に全体を回す
+    const raw = this.cropScreenRect();
+    if (this.spin) {
+      const cx = raw.x + raw.w / 2;
+      const cy = raw.y + raw.h / 2;
+      ctx.translate(cx, cy);
+      ctx.rotate(toRad(this.spin));
+      ctx.translate(-cx, -cy);
+    }
+
     ctx.save();
     ctx.translate(v.ox, v.oy);
     ctx.scale(v.f, v.f);
@@ -599,8 +690,7 @@ export class Editor {
     ctx.restore();
 
     // 枠をデバイスピクセルに合わせる
-    const raw = this.cropScreenRect();
-    const snap = (x: number) => Math.round(x * dpr) / dpr;
+    const snap = (x: number) => (this.spin ? x : Math.round(x * dpr) / dpr);
     const x0 = snap(raw.x);
     const y0 = snap(raw.y);
     const x1 = snap(raw.x + raw.w);
@@ -610,7 +700,7 @@ export class Editor {
     ctx.globalAlpha = overlayAlpha;
     ctx.fillStyle = bg;
     ctx.beginPath();
-    ctx.rect(0, TOOLBAR_H, W, H - TOOLBAR_H);
+    ctx.rect(-W, -H, W * 3, H * 3);
     ctx.rect(x0, y0, x1 - x0, y1 - y0);
     ctx.fill('evenodd');
     ctx.globalAlpha = 1;
@@ -678,9 +768,10 @@ export class Editor {
   private placePills(x0: number, y0: number, x1: number, y1: number): void {
     const ui = this.ui;
     const crop = effectiveCrop(this.state, this.src);
-    const showSize = this.dragging || this.mode === 'ratio';
+    const flashing = performance.now() < this.pillsUntil;
+    const showSize = !this.spin && (this.dragging || this.mode === 'ratio' || flashing);
     const def = ratioDef(this.state.ratio);
-    const showRatio = this.mode === 'ratio' && def.id !== 'free';
+    const showRatio = !this.spin && (this.mode === 'ratio' || flashing) && def.id !== 'free';
     const cx = (x0 + x1) / 2;
 
     ui.sizePill.hidden = !showSize;

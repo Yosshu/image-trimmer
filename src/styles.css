@@ -1,0 +1,486 @@
+/* 配色は docs/SPEC.md §4。OS の設定（ライト／ダーク）に自動で従う */
+:root {
+  color-scheme: dark;
+  --bg: #202020;
+  --text: #ffffff;
+  --text-disabled: #797979;
+  --group-bg: #1f1f1f;
+  --group-border: #191919;
+  --divider: rgba(255, 255, 255, 0.37);
+  --hover: #3b3a39;
+  --pressed: #333231;
+  --accent: #4cc2ff;
+  --accent-hover: #48b1e8;
+  --accent-pressed: #4aa0cd;
+  --accent-text: #000000;
+  --button-bg: #2d2d2d;
+  --button-hover: #323232;
+  --button-border: rgba(255, 255, 255, 0.07);
+  --menu-bg: #2c2c2c;
+  --menu-border: rgba(0, 0, 0, 0.2);
+  --tooltip-bg: #292929;
+  --tooltip-border: #ffffff;
+  --tooltip-b-bg: #2c2c2c;
+  --selected: #3b3a39;
+  --overlay-alpha: 0.75;
+  --ruler: #ffffff;
+  --thumb: #ffffff;
+  --frame: #ffffff;
+  --pill-bg: rgba(0, 0, 0, 0.55);
+  --pill-text: #ffffff;
+  --focus: #ffffff;
+
+  --font: 'Segoe UI Variable Text', 'Segoe UI', 'Yu Gothic UI', 'Meiryo UI', system-ui, -apple-system,
+    'Hiragino Sans', 'Noto Sans JP', sans-serif;
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    color-scheme: light;
+    --bg: #f3f3f3;
+    --text: #1a1a1a;
+    --text-disabled: #a0a0a0;
+    --group-bg: #f9f9f9;
+    --group-border: #e5e5e5;
+    --divider: rgba(0, 0, 0, 0.3);
+    --hover: #eaeaea;
+    --pressed: #e2e2e2;
+    --accent: #005fb8;
+    --accent-hover: #1a6fc0;
+    --accent-pressed: #3380c8;
+    --accent-text: #ffffff;
+    --button-bg: #fbfbfb;
+    --button-hover: #f6f6f6;
+    --button-border: rgba(0, 0, 0, 0.1);
+    --menu-bg: #f9f9f9;
+    --menu-border: rgba(0, 0, 0, 0.1);
+    --tooltip-bg: #f9f9f9;
+    --tooltip-border: #000000;
+    --tooltip-b-bg: #f9f9f9;
+    --selected: #e5e5e5;
+    --ruler: #1a1a1a;
+    --thumb: #1a1a1a;
+    --frame: #1a1a1a;
+    --focus: #000000;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 14px;
+  line-height: 20px;
+  -webkit-font-smoothing: antialiased;
+  -webkit-tap-highlight-color: transparent;
+}
+
+#app {
+  position: fixed;
+  inset: 0;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: none;
+  padding: 0;
+  margin: 0;
+  cursor: default;
+  touch-action: manipulation;
+}
+
+button:focus-visible,
+[tabindex]:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 1px;
+}
+
+.icon {
+  display: inline-flex;
+  flex: none;
+}
+
+.icon svg {
+  display: block;
+}
+
+/* ===== 開始画面（Web 版独自） ===== */
+
+.start {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+}
+
+.start-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+  width: min(520px, 100%);
+  padding: 48px 24px;
+  border: 2px dashed var(--divider);
+  border-radius: 8px;
+  text-align: center;
+}
+
+.start.drag-over .start-card {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+}
+
+.start-title {
+  margin: 0;
+  font-size: 20px;
+  line-height: 28px;
+  font-weight: 600;
+}
+
+.start-hint {
+  margin: 0;
+  color: var(--text-disabled);
+}
+
+.start-error {
+  margin: 0;
+  min-height: 20px;
+  color: #ff99a4;
+}
+
+@media (prefers-color-scheme: light) {
+  .start-error {
+    color: #c42b1c;
+  }
+}
+
+/* ===== ボタン共通 ===== */
+
+.btn-accent,
+.btn-standard {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  height: 32px;
+  padding: 0 12px;
+  border-radius: 4px;
+}
+
+.btn-accent {
+  background: var(--accent);
+  color: var(--accent-text);
+}
+
+.btn-accent:hover {
+  background: var(--accent-hover);
+}
+
+.btn-accent:active {
+  background: var(--accent-pressed);
+}
+
+.btn-standard {
+  background: var(--button-bg);
+  border: 1px solid var(--button-border);
+}
+
+.btn-standard:hover {
+  background: var(--button-hover);
+}
+
+/* ツールバー・下部のアイコンボタン */
+.btn-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 4px;
+}
+
+.btn-icon:hover:not(:disabled),
+.btn-text:hover:not(:disabled) {
+  background: var(--hover);
+}
+
+.btn-icon:active:not(:disabled),
+.btn-text:active:not(:disabled) {
+  background: var(--pressed);
+}
+
+.btn-icon:disabled,
+.btn-text:disabled {
+  color: var(--text-disabled);
+}
+
+.btn-text {
+  height: 32px;
+  padding: 0 8px;
+  border-radius: 4px;
+}
+
+/* ===== 編集画面 ===== */
+
+.editor {
+  position: absolute;
+  inset: 0;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.stage {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+  touch-action: none;
+}
+
+.toolbar {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 52px;
+  background: var(--bg);
+  pointer-events: none;
+}
+
+.toolbar > * {
+  pointer-events: auto;
+}
+
+.tool-group {
+  position: absolute;
+  top: 8px;
+  left: 12px;
+  display: flex;
+  align-items: center;
+  height: 44px;
+  padding: 0 6px 0 8px;
+  background: var(--group-bg);
+  border: 1px solid var(--group-border);
+  border-radius: 8px;
+}
+
+.tool-group .btn-icon + .btn-icon {
+  margin-left: 8px;
+}
+
+.tool-group .btn-icon.undo {
+  margin-left: 4px;
+}
+
+.tool-group .btn-icon.redo {
+  margin-left: 6px;
+}
+
+.zoom-value {
+  width: 50px;
+  margin-left: 6px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.divider {
+  width: 1px;
+  height: 28px;
+  margin: 0 6px 0 4px;
+  background: var(--divider);
+}
+
+.actions {
+  position: absolute;
+  top: 14px;
+  right: 20px;
+  display: flex;
+  gap: 8px;
+}
+
+.save-button {
+  width: 158px;
+  gap: 12px;
+}
+
+.cancel-button {
+  width: 110px;
+}
+
+/* 枠に重ねるラベル（サイズ・比率） */
+.pill {
+  position: absolute;
+  padding: 2px 8px;
+  border-radius: 4px;
+  background: var(--pill-bg);
+  color: var(--pill-text);
+  white-space: nowrap;
+  pointer-events: none;
+  transform: translateX(-50%);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ===== 下部：角度スライダーとボタン列 ===== */
+
+.bottom-panel {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 130px;
+  pointer-events: none;
+}
+
+.bottom-panel > * {
+  pointer-events: auto;
+}
+
+.angle-value {
+  position: absolute;
+  left: 50%;
+  bottom: 100px;
+  transform: translateX(-50%);
+  white-space: nowrap;
+  pointer-events: none;
+  font-variant-numeric: tabular-nums;
+}
+
+.ruler {
+  position: absolute;
+  left: 50%;
+  bottom: 62px;
+  width: var(--ruler-width, 680px);
+  height: 28px;
+  transform: translateX(-50%);
+  touch-action: none;
+}
+
+.ruler canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.bottom-row {
+  position: absolute;
+  left: 50%;
+  bottom: 12px;
+  width: var(--ruler-width, 680px);
+  height: 32px;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.bottom-row .group {
+  display: flex;
+  gap: 10px;
+}
+
+.ratio-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 32px;
+  padding: 0 8px;
+  border-radius: 4px;
+}
+
+.ratio-button:hover {
+  background: var(--hover);
+}
+
+/* ===== 比率ピッカー ===== */
+
+.ratio-picker {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 120px;
+}
+
+.ratio-list {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 40px;
+  display: flex;
+  justify-content: safe center;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.ratio-list::-webkit-scrollbar {
+  display: none;
+}
+
+.ratio-item {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: 80px;
+  gap: 6px;
+}
+
+.ratio-item .ratio-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 48px;
+  height: 48px;
+  border-radius: 4px;
+}
+
+.ratio-item:hover .ratio-icon {
+  background: var(--hover);
+}
+
+.ratio-item.selected .ratio-icon {
+  background: var(--selected);
+}
+
+.ratio-item .ratio-label {
+  font-size: 13px;
+  line-height: 18px;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+
+.ratio-item.selected .ratio-label {
+  font-weight: 700;
+}
+
+.ratio-done {
+  position: absolute;
+  left: 50%;
+  bottom: 0;
+  height: 20px;
+  line-height: 20px;
+  padding: 0 12px;
+  transform: translateX(-50%);
+  border-radius: 4px;
+}
+
+.ratio-done:hover {
+  background: var(--hover);
+}
+
+[hidden] {
+  display: none !important;
+}

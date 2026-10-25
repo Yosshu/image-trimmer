@@ -1,10 +1,31 @@
 import { h } from './dom';
-import { cropRectOut, fitScale, type Rect, roundHalfEven, type Size, toRad } from './geometry';
+import {
+  type Crop,
+  cropCenterOut,
+  cropRectOut,
+  dragHandle,
+  fitScale,
+  type Handle,
+  panCrop,
+  type Rect,
+  roundHalfEven,
+  type Size,
+  toRad,
+} from './geometry';
 import { ICONS, icon, ratioIcon } from './icons';
 import type { SourceImage } from './loader';
-import { RATIOS, ratioDef } from './ratios';
+import { RATIOS, ratioDef, ratioValue } from './ratios';
 import { drawRuler, PX_PER_DEG } from './ruler';
-import { effectiveCrop, type EditState, History, imageSize, initialState, sameState, setAngle } from './state';
+import {
+  effectiveCrop,
+  type EditState,
+  History,
+  imageSize,
+  initialState,
+  sameState,
+  setAngle,
+  withCrop,
+} from './state';
 
 /** 画面の配置（CSS px）。docs/SPEC.md §1 */
 const TOOLBAR_H = 52;
@@ -15,6 +36,29 @@ const STAGE_SIDE = 64;
 /** ハンドルの太さ（本家の実測 4 物理 px ÷ 125%）と長さ */
 const HANDLE_THICKNESS = 3.2;
 const HANDLE_LENGTH = 28;
+/** ハンドルをつかめる範囲：枠線から外側・内側への距離 */
+const HIT_OUTSIDE = 14;
+const HIT_INSIDE = 10;
+/** ドラッグ中の枠の最小サイズ（画面上の CSS px） */
+const MIN_CROP_SCREEN = 48;
+/** ズームの上限（画像の 1px を画面の物理ピクセル 16px で表示） */
+const MAX_ZOOM = 16;
+/** 手を離したあと、枠を中央に戻すアニメーションの長さ */
+const FIT_DURATION = 250;
+
+type DragTarget = Handle | 'pan';
+
+const CURSORS: Record<DragTarget, string> = {
+  n: 'ns-resize',
+  s: 'ns-resize',
+  e: 'ew-resize',
+  w: 'ew-resize',
+  ne: 'nesw-resize',
+  sw: 'nesw-resize',
+  nw: 'nwse-resize',
+  se: 'nwse-resize',
+  pan: 'move',
+};
 
 /** 画面への表示：画面上の点 = (ox, oy) + f × 出力座標 */
 interface View {
@@ -40,6 +84,8 @@ export class Editor {
   /** ドラッグ中（グリッドとサイズを表示する） */
   private dragging = false;
   private raf = 0;
+  private animation = 0;
+  private lastRatio: string | null = null;
 
   private ui!: {
     zoomIn: HTMLButtonElement;
@@ -78,6 +124,7 @@ export class Editor {
     this.canvas = h('canvas', { class: 'stage' });
     this.ctx = this.canvas.getContext('2d')!;
     this.el = h('div', { class: 'editor' }, [this.canvas, ...this.buildUi()]);
+    this.bindCanvas();
 
     window.addEventListener('resize', this.onResize);
     this.colorScheme.addEventListener('change', this.requestRender);
@@ -93,6 +140,7 @@ export class Editor {
 
   destroy(): void {
     cancelAnimationFrame(this.raf);
+    cancelAnimationFrame(this.animation);
     window.removeEventListener('resize', this.onResize);
     this.colorScheme.removeEventListener('change', this.requestRender);
     this.el.remove();
@@ -220,6 +268,7 @@ export class Editor {
 
   /** 操作の途中の状態を表示する（履歴にはまだ積まない） */
   private preview(state: EditState): void {
+    this.stopAnimation();
     this.state = state;
     this.view = this.fitView(state);
     this.update();
@@ -278,6 +327,152 @@ export class Editor {
     ruler.addEventListener('blur', () => this.commit());
   }
 
+  /** 画面上の点が、枠のどこに当たるか */
+  private hitTest(px: number, py: number): DragTarget | null {
+    const r = this.cropScreenRect();
+    const x0 = r.x;
+    const y0 = r.y;
+    const x1 = r.x + r.w;
+    const y1 = r.y + r.h;
+    if (px < x0 - HIT_OUTSIDE || px > x1 + HIT_OUTSIDE || py < y0 - HIT_OUTSIDE || py > y1 + HIT_OUTSIDE) {
+      return null;
+    }
+    // 枠線の近く（外側 HIT_OUTSIDE、内側 HIT_INSIDE）か
+    const nearL = px <= x0 + HIT_INSIDE;
+    const nearR = px >= x1 - HIT_INSIDE;
+    const nearT = py <= y0 + HIT_INSIDE;
+    const nearB = py >= y1 - HIT_INSIDE;
+    // 四隅：L 字のハンドルの長さの範囲まで
+    const len = Math.min(HANDLE_LENGTH, r.w / 3, r.h / 3);
+    const inL = px <= x0 + len;
+    const inR = px >= x1 - len;
+    const inT = py <= y0 + len;
+    const inB = py >= y1 - len;
+    if ((nearT && inL) || (nearL && inT)) return 'nw';
+    if ((nearT && inR) || (nearR && inT)) return 'ne';
+    if ((nearB && inL) || (nearL && inB)) return 'sw';
+    if ((nearB && inR) || (nearR && inB)) return 'se';
+    if (nearT) return 'n';
+    if (nearB) return 's';
+    if (nearL) return 'w';
+    if (nearR) return 'e';
+    return 'pan';
+  }
+
+  private pointerPos(e: PointerEvent): { x: number; y: number } {
+    const rect = this.el.getBoundingClientRect();
+    return { x: e.clientX - rect.left, y: e.clientY - rect.top };
+  }
+
+  private bindCanvas(): void {
+    const canvas = this.canvas;
+
+    canvas.addEventListener('pointermove', (e) => {
+      if (this.dragging) return;
+      const p = this.pointerPos(e);
+      const target = this.hitTest(p.x, p.y);
+      canvas.style.cursor = target ? CURSORS[target] : '';
+    });
+
+    canvas.addEventListener('pointerdown', (e) => {
+      if (e.button !== 0) return;
+      const p0 = this.pointerPos(e);
+      const target = this.hitTest(p0.x, p0.y);
+      if (!target) return;
+      e.preventDefault();
+      this.stopAnimation();
+      canvas.setPointerCapture(e.pointerId);
+
+      const start = effectiveCrop(this.state, this.src);
+      const startState = withCrop(this.state, start);
+      const view = { ...this.view };
+      const img = imageSize(this.state, this.src);
+      const angle = this.state.angle;
+      const options = this.dragOptions(start, view);
+      this.dragging = true;
+
+      const move = (ev: PointerEvent) => {
+        const p = this.pointerPos(ev);
+        const delta = { x: (p.x - p0.x) / view.f, y: (p.y - p0.y) / view.f };
+        if (target === 'pan') {
+          // 枠は動かさず、後ろの画像をスライドさせる
+          this.preview(withCrop(startState, panCrop(start, delta, img, angle)));
+        } else {
+          // 画像は動かさず、枠を変形する（手を離すまで表示倍率は変えない）
+          this.state = withCrop(startState, dragHandle(start, target, delta, options));
+          this.view = view;
+          this.update();
+        }
+      };
+      const end = () => {
+        canvas.removeEventListener('pointermove', move);
+        canvas.removeEventListener('pointerup', end);
+        canvas.removeEventListener('pointercancel', end);
+        this.dragging = false;
+        this.commit();
+        this.animateTo(this.fitView(this.state));
+      };
+      canvas.addEventListener('pointermove', move);
+      canvas.addEventListener('pointerup', end);
+      canvas.addEventListener('pointercancel', end);
+      this.update();
+    });
+  }
+
+  /** ハンドルのドラッグの制限：画像の内側、画面の見えている範囲、最小サイズ */
+  private dragOptions(start: Crop, view: View) {
+    const W = this.el.clientWidth;
+    const H = this.el.clientHeight;
+    const dpr = window.devicePixelRatio || 1;
+    const stage = this.stageRect();
+    const margin = 4;
+    // 手を離して画面に合わせたとき、ズームの上限を超えない大きさ
+    const minForZoom = Math.min(stage.w, stage.h) / (MAX_ZOOM / dpr);
+    const minSize = Math.min(Math.max(MIN_CROP_SCREEN / view.f, minForZoom, 1), start.w, start.h);
+    const img = imageSize(this.state, this.src);
+    return {
+      img,
+      angle: this.state.angle,
+      ratio: ratioValue(this.state.ratio, img),
+      minSize,
+      bounds: {
+        x: (margin - view.ox) / view.f,
+        y: (TOOLBAR_H + margin - view.oy) / view.f,
+        w: (W - margin * 2) / view.f,
+        h: (H - TOOLBAR_H - margin * 2) / view.f,
+      },
+    };
+  }
+
+  /** 表示倍率と枠の位置を、なめらかに target へ移す */
+  private animateTo(target: View): void {
+    this.stopAnimation();
+    const from = { ...this.view };
+    const crop = effectiveCrop(this.state, this.src);
+    const pc = cropCenterOut(crop, this.state.angle);
+    const fromC = { x: from.ox + from.f * pc.x, y: from.oy + from.f * pc.y };
+    const toC = { x: target.ox + target.f * pc.x, y: target.oy + target.f * pc.y };
+    const t0 = performance.now();
+    const step = (now: number) => {
+      const t = Math.min(1, (now - t0) / FIT_DURATION);
+      const k = 1 - Math.pow(1 - t, 3);
+      const f = from.f * Math.pow(target.f / from.f, k);
+      const cx = fromC.x + (toC.x - fromC.x) * k;
+      const cy = fromC.y + (toC.y - fromC.y) * k;
+      this.view = t < 1 ? { f, ox: cx - f * pc.x, oy: cy - f * pc.y } : target;
+      this.update();
+      this.animation = t < 1 ? requestAnimationFrame(step) : 0;
+    };
+    this.animation = requestAnimationFrame(step);
+  }
+
+  private stopAnimation(): void {
+    if (this.animation) {
+      cancelAnimationFrame(this.animation);
+      this.animation = 0;
+    }
+  }
+
   private setMode(mode: 'angle' | 'ratio'): void {
     this.mode = mode;
     this.update();
@@ -317,6 +512,7 @@ export class Editor {
   }
 
   private onResize = (): void => {
+    this.stopAnimation();
     this.view = this.fitView(this.state);
     this.update();
   };
@@ -346,12 +542,15 @@ export class Editor {
     ui.angleValue.textContent = `${formatAngle(s.angle)} °`;
     ui.ruler.setAttribute('aria-valuenow', String(s.angle));
 
-    const def = ratioDef(s.ratio);
-    ui.ratioButton.replaceChildren(icon(ratioIcon(s.ratio), 20), h('span', { text: def.label }));
-    ui.ratioButton.setAttribute('aria-label', `縦横比: ${def.label}`);
-    for (const [id, item] of ui.ratioItems) {
-      item.classList.toggle('selected', id === s.ratio);
-      item.setAttribute('aria-selected', String(id === s.ratio));
+    if (this.lastRatio !== s.ratio) {
+      this.lastRatio = s.ratio;
+      const def = ratioDef(s.ratio);
+      ui.ratioButton.replaceChildren(icon(ratioIcon(s.ratio), 20), h('span', { text: def.label }));
+      ui.ratioButton.setAttribute('aria-label', `縦横比: ${def.label}`);
+      for (const [id, item] of ui.ratioItems) {
+        item.classList.toggle('selected', id === s.ratio);
+        item.setAttribute('aria-selected', String(id === s.ratio));
+      }
     }
 
     ui.anglePanel.hidden = this.mode !== 'angle';

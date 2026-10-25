@@ -18,6 +18,7 @@ import type { SourceImage } from './loader';
 import { RATIOS, ratioDef, ratioValue } from './ratios';
 import { drawRuler, PX_PER_DEG } from './ruler';
 import { showSaveDialog } from './saveDialog';
+import { Tooltips } from './tooltip';
 import {
   effectiveCrop,
   type EditState,
@@ -35,10 +36,19 @@ import {
 } from './state';
 
 /** 画面の配置（CSS px）。docs/SPEC.md §1 */
-const TOOLBAR_H = 52;
-const STAGE_TOP = 118;
-const STAGE_BOTTOM = 159;
-const STAGE_SIDE = 64;
+interface Layout {
+  /** ツールバーの下端（画像はここで切り取る） */
+  toolbarH: number;
+  /** 枠を収める領域：上端、下からの距離、左右の余白 */
+  stageTop: number;
+  stageBottom: number;
+  stageSide: number;
+}
+
+const LAYOUT: Layout = { toolbarH: 52, stageTop: 118, stageBottom: 159, stageSide: 64 };
+/** 狭い画面（スマホなど）：ツールバーを 2 段にし、余白を詰める（Web 版独自） */
+const COMPACT_LAYOUT: Layout = { toolbarH: 100, stageTop: 124, stageBottom: 150, stageSide: 20 };
+const COMPACT_WIDTH = 720;
 
 /** ハンドルの太さ（本家の実測 4 物理 px ÷ 125%）と長さ */
 const HANDLE_THICKNESS = 3.2;
@@ -46,6 +56,8 @@ const HANDLE_LENGTH = 28;
 /** ハンドルをつかめる範囲：枠線から外側・内側への距離 */
 const HIT_OUTSIDE = 14;
 const HIT_INSIDE = 10;
+/** タッチ操作では指の大きさに合わせて広げる */
+const HIT_TOUCH = 24;
 /** ドラッグ中の枠の最小サイズ（画面上の CSS px） */
 const MIN_CROP_SCREEN = 48;
 /** ズームの上限（画像の 1px を画面の物理ピクセル 16px で表示） */
@@ -64,6 +76,8 @@ const ZOOM_STEP = 1.25;
 const ZOOM_DURATION = 150;
 /** ホイールでのズームを 1 回の操作としてまとめる間隔 */
 const WHEEL_COMMIT_DELAY = 300;
+
+const CROP_TOOLTIP = 'ハンドルをドラッグするか、矢印キーを使用して画像をトリミングします';
 
 type DragTarget = Handle | 'pan';
 
@@ -104,6 +118,8 @@ export class Editor {
   private dragging = false;
   private raf = 0;
   private animation = 0;
+  /** 実行中のアニメーションの種類（止めたときの後始末が違う） */
+  private animationKind: 'fit' | 'spin' | 'zoom' | null = null;
   private lastRatio: string | null = null;
   /** 90° 回転のアニメーション中、枠の中心を軸に追加で回す角度（度） */
   private spin = 0;
@@ -111,6 +127,7 @@ export class Editor {
   private pillsUntil = 0;
   private pillsTimer = 0;
   private wheelTimer = 0;
+  private tips: Tooltips;
 
   private ui!: {
     zoomIn: HTMLButtonElement;
@@ -149,6 +166,10 @@ export class Editor {
     this.canvas = h('canvas', { class: 'stage' });
     this.ctx = this.canvas.getContext('2d')!;
     this.el = h('div', { class: 'editor' }, [this.canvas, ...this.buildUi()]);
+    this.tips = new Tooltips(this.el);
+    for (const el of this.el.querySelectorAll<HTMLElement>('[data-tooltip]')) {
+      this.tips.attach(el, el.dataset.tooltip!, el.dataset.tooltipStyle === 'b' ? 'b' : 'a');
+    }
     this.bindCanvas();
 
     window.addEventListener('resize', this.onResize);
@@ -169,6 +190,7 @@ export class Editor {
     cancelAnimationFrame(this.animation);
     clearTimeout(this.pillsTimer);
     clearTimeout(this.wheelTimer);
+    this.tips.destroy();
     window.removeEventListener('resize', this.onResize);
     window.removeEventListener('keydown', this.onKeyDown);
     this.colorScheme.removeEventListener('change', this.requestRender);
@@ -179,9 +201,11 @@ export class Editor {
 
   private buildUi(): HTMLElement[] {
     const iconButton = (svg: string, size: number, label: string, cls = '') => {
-      const b = h('button', { class: `btn-icon ${cls}`.trim(), type: 'button', 'aria-label': label }, [
-        icon(svg, size),
-      ]);
+      const b = h(
+        'button',
+        { class: `btn-icon ${cls}`.trim(), type: 'button', 'aria-label': label, 'data-tooltip': label },
+        [icon(svg, size)],
+      );
       return b;
     };
 
@@ -206,7 +230,7 @@ export class Editor {
     cancel.addEventListener('click', () => this.callbacks.onCancel());
     zoomIn.addEventListener('click', () => this.zoomBy(ZOOM_STEP));
     zoomOut.addEventListener('click', () => this.zoomBy(1 / ZOOM_STEP));
-    reset.addEventListener('click', () => this.apply(initialState(this.src), false));
+    reset.addEventListener('click', () => this.apply(() => initialState(this.src), false));
     undo.addEventListener('click', () => this.undo());
     redo.addEventListener('click', () => this.redo());
 
@@ -237,6 +261,7 @@ export class Editor {
         role: 'slider',
         tabindex: 0,
         'aria-label': '角度',
+        'data-tooltip': 'ドラッグするか、方向キーを使用して画像を回転',
         'aria-valuemin': -45,
         'aria-valuemax': 45,
       },
@@ -261,10 +286,14 @@ export class Editor {
     const ratioItems = new Map<string, HTMLButtonElement>();
     const list = h('div', { class: 'ratio-list', role: 'listbox', 'aria-label': '縦横比' });
     for (const r of RATIOS) {
-      const item = h('button', { class: 'ratio-item', type: 'button', role: 'option', 'aria-label': r.tooltip }, [
-        h('span', { class: 'ratio-icon' }, [icon(ratioIcon(r.id), 24)]),
-        h('span', { class: 'ratio-label', text: r.label }),
-      ]);
+      const item = h(
+        'button',
+        { class: 'ratio-item', type: 'button', role: 'option', 'aria-label': r.tooltip, 'data-tooltip': r.tooltip },
+        [
+          h('span', { class: 'ratio-icon' }, [icon(ratioIcon(r.id), 24)]),
+          h('span', { class: 'ratio-label', text: r.label }),
+        ],
+      );
       ratioItems.set(r.id, item);
       list.append(item);
     }
@@ -325,6 +354,7 @@ export class Editor {
 
   /** 表示中の状態を確定して履歴に積む */
   private commit(): void {
+    this.stopAnimation();
     this.history.push(this.state);
     this.state = this.history.current;
     this.update();
@@ -338,6 +368,7 @@ export class Editor {
     ruler.addEventListener('pointerdown', (e) => {
       if (e.button !== 0) return;
       e.preventDefault();
+      this.settle();
       // マウスで触ったときはフォーカス枠を出さない（方向キーはそのまま使えるようにする）
       ruler.focus({ preventScroll: true, focusVisible: false } as FocusOptions);
       ruler.setPointerCapture(e.pointerId);
@@ -364,33 +395,41 @@ export class Editor {
       if (e.key === 'ArrowLeft' || e.key === 'ArrowDown') return -step;
       return 0;
     };
+    let keyActive = false;
     ruler.addEventListener('keydown', (e) => {
       const step = keyStep(e);
       if (!step) return;
       e.preventDefault();
+      if (!keyActive) this.settle();
+      keyActive = true;
       this.preview(setAngle(this.state, this.state.angle + step));
     });
     ruler.addEventListener('keyup', (e) => {
-      if (keyStep(e)) this.commit();
+      if (!keyStep(e) || !keyActive) return;
+      keyActive = false;
+      this.commit();
     });
     ruler.addEventListener('blur', () => this.commit());
   }
 
   /** 画面上の点が、枠のどこに当たるか */
-  private hitTest(px: number, py: number): DragTarget | null {
+  private hitTest(px: number, py: number, touch = false): DragTarget | null {
     const r = this.cropScreenRect();
     const x0 = r.x;
     const y0 = r.y;
     const x1 = r.x + r.w;
     const y1 = r.y + r.h;
-    if (px < x0 - HIT_OUTSIDE || px > x1 + HIT_OUTSIDE || py < y0 - HIT_OUTSIDE || py > y1 + HIT_OUTSIDE) {
+    const outside = touch ? HIT_TOUCH : HIT_OUTSIDE;
+    // 枠が小さいときは、内側の判定を詰めて画像をスライドできる範囲を残す
+    const inside = Math.min(touch ? HIT_TOUCH : HIT_INSIDE, r.w / 4, r.h / 4);
+    if (px < x0 - outside || px > x1 + outside || py < y0 - outside || py > y1 + outside) {
       return null;
     }
-    // 枠線の近く（外側 HIT_OUTSIDE、内側 HIT_INSIDE）か
-    const nearL = px <= x0 + HIT_INSIDE;
-    const nearR = px >= x1 - HIT_INSIDE;
-    const nearT = py <= y0 + HIT_INSIDE;
-    const nearB = py >= y1 - HIT_INSIDE;
+    // 枠線の近く（外側 outside、内側 inside）か
+    const nearL = px <= x0 + inside;
+    const nearR = px >= x1 - inside;
+    const nearT = py <= y0 + inside;
+    const nearB = py >= y1 - inside;
     // 四隅：L 字のハンドルの長さの範囲まで
     const len = Math.min(HANDLE_LENGTH, r.w / 3, r.h / 3);
     const inL = px <= x0 + len;
@@ -419,17 +458,21 @@ export class Editor {
     canvas.addEventListener('pointermove', (e) => {
       if (this.dragging) return;
       const p = this.pointerPos(e);
-      const target = this.hitTest(p.x, p.y);
+      const target = this.hitTest(p.x, p.y, e.pointerType === 'touch');
       canvas.style.cursor = target ? CURSORS[target] : '';
+      if (target && e.pointerType !== 'touch') this.tips.hoverAt(CROP_TOOLTIP, e.clientX, e.clientY);
+      else this.tips.hide();
     });
+    canvas.addEventListener('pointerleave', () => this.tips.hide());
 
     canvas.addEventListener('pointerdown', (e) => {
       if (e.button !== 0) return;
       const p0 = this.pointerPos(e);
-      const target = this.hitTest(p0.x, p0.y);
+      const target = this.hitTest(p0.x, p0.y, e.pointerType === 'touch');
       if (!target) return;
       e.preventDefault();
-      this.stopAnimation();
+      this.tips.hide();
+      this.settle();
       canvas.setPointerCapture(e.pointerId);
 
       const start = effectiveCrop(this.state, this.src);
@@ -489,7 +532,7 @@ export class Editor {
 
     // 矢印キー：枠を動かす（後ろの画像が逆向きにスライドする）。Shift と一緒なら右辺・下辺を動かして大きさを変える
     canvas.tabIndex = 0;
-    canvas.setAttribute('aria-label', 'ハンドルをドラッグするか、矢印キーを使用して画像をトリミングします');
+    canvas.setAttribute('aria-label', CROP_TOOLTIP);
     canvas.addEventListener('focus', this.requestRender);
     canvas.addEventListener('blur', this.requestRender);
     let keyStart: Crop | null = null;
@@ -506,7 +549,7 @@ export class Editor {
       if (!d) return;
       e.preventDefault();
       e.stopPropagation();
-      this.stopAnimation();
+      if (!keyStart) this.settle();
       const crop = effectiveCrop(this.state, this.src);
       keyStart ??= crop;
       const f = this.view.f;
@@ -547,9 +590,9 @@ export class Editor {
       minSize,
       bounds: {
         x: (margin - view.ox) / view.f,
-        y: (TOOLBAR_H + margin - view.oy) / view.f,
+        y: (this.layout().toolbarH + margin - view.oy) / view.f,
         w: (W - margin * 2) / view.f,
-        h: (H - TOOLBAR_H - margin * 2) / view.f,
+        h: (H - this.layout().toolbarH - margin * 2) / view.f,
       },
     };
   }
@@ -563,34 +606,56 @@ export class Editor {
     const fromC = { x: from.ox + from.f * pc.x, y: from.oy + from.f * pc.y };
     const toC = { x: target.ox + target.f * pc.x, y: target.oy + target.f * pc.y };
     const t0 = performance.now();
-    const step = (now: number) => {
+    this.startAnimation('fit', (now) => {
       const t = Math.min(1, (now - t0) / FIT_DURATION);
-      const k = 1 - Math.pow(1 - t, 3);
+      const k = easeOut(t);
       const f = from.f * Math.pow(target.f / from.f, k);
       const cx = fromC.x + (toC.x - fromC.x) * k;
       const cy = fromC.y + (toC.y - fromC.y) * k;
       this.view = t < 1 ? { f, ox: cx - f * pc.x, oy: cy - f * pc.y } : target;
       this.update();
-      this.animation = t < 1 ? requestAnimationFrame(step) : 0;
-    };
-    this.animation = requestAnimationFrame(step);
+      return t < 1;
+    });
   }
 
+  /** アニメーションを止める。回転・ズームは最後の状態に、枠を中央に戻す途中ならその位置のままにする */
   private stopAnimation(): void {
-    if (this.animation) {
-      cancelAnimationFrame(this.animation);
-      this.animation = 0;
-    }
-    if (this.spin) {
+    if (!this.animation) return;
+    cancelAnimationFrame(this.animation);
+    this.animation = 0;
+    const kind = this.animationKind;
+    this.animationKind = null;
+    if (kind === 'spin' || kind === 'zoom') {
       this.spin = 0;
+      this.state = this.history.current;
       this.view = this.fitView(this.state);
     }
   }
 
-  /** 確定した状態に移り、表示を合わせる */
-  private apply(next: EditState, animate: boolean): void {
+  private startAnimation(kind: 'fit' | 'spin' | 'zoom', step: (now: number) => boolean): void {
+    this.animationKind = kind;
+    const frame = (now: number) => {
+      const more = step(now);
+      this.animation = more ? requestAnimationFrame(frame) : 0;
+      if (!more) this.animationKind = null;
+    };
+    this.animation = requestAnimationFrame(frame);
+  }
+
+  /** ホイールのズームなど、まだ履歴に積んでいない操作を確定する */
+  private settle(): void {
+    clearTimeout(this.wheelTimer);
     this.stopAnimation();
-    this.history.push(next);
+    if (!this.dragging && !sameState(this.state, this.history.current)) {
+      this.history.push(this.state);
+      this.state = this.history.current;
+    }
+  }
+
+  /** 確定した状態に移り、表示を合わせる */
+  private apply(next: (current: EditState) => EditState, animate: boolean): void {
+    this.settle();
+    this.history.push(next(this.history.current));
     this.state = this.history.current;
     if (animate) {
       this.update();
@@ -609,12 +674,12 @@ export class Editor {
   }
 
   private chooseRatio(id: EditState['ratio']): void {
-    this.apply(selectRatio(this.history.current, this.src, id), true);
+    this.apply((s) => selectRatio(s, this.src, id), true);
   }
 
   /** 90° 回転：画像と枠を一緒に回しながら、新しい大きさに合わせる */
   private rotate(dir: 1 | -1): void {
-    this.stopAnimation();
+    this.settle();
     const fromF = this.view.f;
     this.history.push(rotateQuarter(this.history.current, dir));
     this.state = this.history.current;
@@ -623,16 +688,15 @@ export class Editor {
     const center = { x: target.ox + target.f * pc.x, y: target.oy + target.f * pc.y };
     this.flashPills();
     const t0 = performance.now();
-    const step = (now: number) => {
+    this.startAnimation('spin', (now) => {
       const t = Math.min(1, (now - t0) / ROTATE_DURATION);
       const k = easeOut(t);
       const f = fromF * Math.pow(target.f / fromF, k);
       this.spin = t < 1 ? -dir * 90 * (1 - k) : 0;
       this.view = t < 1 ? { f, ox: center.x - f * pc.x, oy: center.y - f * pc.y } : target;
       this.update();
-      this.animation = t < 1 ? requestAnimationFrame(step) : 0;
-    };
-    this.animation = requestAnimationFrame(step);
+      return t < 1;
+    });
   }
 
   /** 今よりどれだけ拡大できるか（ズームの上限まで） */
@@ -644,38 +708,33 @@ export class Editor {
 
   /** ズーム：枠の画面上の大きさは変えず、後ろの画像を拡大・縮小する */
   private zoomBy(factor: number): void {
-    this.stopAnimation();
+    this.settle();
     const start = this.history.current;
     const target = factor > 1 ? Math.min(factor, this.maxZoomFactor()) : factor;
     if (target > 1 && target <= 1 + 1e-6) return;
     if (target < 1 && !canZoomOut(start, this.src)) return;
+    // 最後の状態を先に確定し、途中の状態は表示だけに使う
+    this.history.push(zoom(start, this.src, target));
     this.flashPills();
     const t0 = performance.now();
-    const step = (now: number) => {
+    this.startAnimation('zoom', (now) => {
       const t = Math.min(1, (now - t0) / ZOOM_DURATION);
-      const k = easeOut(t);
-      this.state = zoom(start, this.src, Math.pow(target, k));
+      this.state = t < 1 ? zoom(start, this.src, Math.pow(target, easeOut(t))) : this.history.current;
       this.view = this.fitView(this.state);
-      if (t < 1) {
-        this.update();
-        this.animation = requestAnimationFrame(step);
-      } else {
-        this.animation = 0;
-        this.commit();
-      }
-    };
-    this.animation = requestAnimationFrame(step);
+      this.update();
+      return t < 1;
+    });
   }
 
   private undo(): void {
-    this.stopAnimation();
+    this.settle();
     this.state = this.history.undo();
     this.view = this.fitView(this.state);
     this.update();
   }
 
   private redo(): void {
-    this.stopAnimation();
+    this.settle();
     this.state = this.history.redo();
     this.view = this.fitView(this.state);
     this.update();
@@ -702,7 +761,7 @@ export class Editor {
   };
 
   private flipImage(axis: 'h' | 'v'): void {
-    this.apply(flip(this.history.current, axis), false);
+    this.apply((s) => flip(s, axis), false);
   }
 
   private setMode(mode: 'angle' | 'ratio'): void {
@@ -714,19 +773,28 @@ export class Editor {
 
   /** 「保存オプション」のメニュー */
   private buildSaveMenu(button: HTMLButtonElement): HTMLElement {
-    const saveCopy = h('button', { class: 'menu-item', type: 'button', role: 'menuitem', text: 'コピーとして保存' });
+    const saveCopy = h('button', {
+      class: 'menu-item',
+      type: 'button',
+      role: 'menuitem',
+      text: 'コピーとして保存',
+      'data-tooltip': '画像のコピーを保存します',
+      'data-tooltip-style': 'b',
+    });
     const copy = h('button', {
       class: 'menu-item',
       type: 'button',
       role: 'menuitem',
       text: 'クリップボードにコピー',
       'data-tooltip': '画像をクリップボードにコピーします',
+      'data-tooltip-style': 'b',
     });
     const menu = h('div', { class: 'menu', role: 'menu', hidden: true }, [saveCopy, copy]);
     const items = [saveCopy, copy];
 
     const close = () => {
       if (menu.hidden) return;
+      this.tips.hide();
       menu.hidden = true;
       button.setAttribute('aria-expanded', 'false');
       document.removeEventListener('pointerdown', onOutside, true);
@@ -809,14 +877,19 @@ export class Editor {
   // ===== 配置 =====
 
   /** 枠を収める領域（CSS px） */
+  private layout(): Layout {
+    return this.el.clientWidth < COMPACT_WIDTH ? COMPACT_LAYOUT : LAYOUT;
+  }
+
   private stageRect(): Rect {
     const w = this.el.clientWidth;
     const hgt = this.el.clientHeight;
+    const l = this.layout();
     return {
-      x: STAGE_SIDE,
-      y: STAGE_TOP,
-      w: Math.max(1, w - STAGE_SIDE * 2),
-      h: Math.max(1, hgt - STAGE_TOP - STAGE_BOTTOM),
+      x: l.stageSide,
+      y: l.stageTop,
+      w: Math.max(1, w - l.stageSide * 2),
+      h: Math.max(1, hgt - l.stageTop - l.stageBottom),
     };
   }
 
@@ -858,6 +931,7 @@ export class Editor {
   /** ボタンの状態・数値の表示を更新して、再描画する */
   private update(): void {
     const ui = this.ui;
+    this.el.classList.toggle('compact', this.layout() === COMPACT_LAYOUT);
     const dpr = window.devicePixelRatio || 1;
     const s = this.state;
 
@@ -914,7 +988,8 @@ export class Editor {
     // 画像はツールバーの下端で切り取る
     ctx.save();
     ctx.beginPath();
-    ctx.rect(0, TOOLBAR_H, W, H - TOOLBAR_H);
+    const toolbarH = this.layout().toolbarH;
+    ctx.rect(0, toolbarH, W, H - toolbarH);
     ctx.clip();
 
     // 90° 回転のアニメーション中は、枠の中心を軸に全体を回す

@@ -164,6 +164,13 @@ button:focus-visible,
   color: var(--text-disabled);
 }
 
+.start-note {
+  margin: 0;
+  font-size: 12px;
+  line-height: 16px;
+  color: var(--text-disabled);
+}
+
 .start-error {
   margin: 0;
   min-height: 20px;
@@ -335,6 +342,34 @@ button:focus-visible,
   width: 110px;
 }
 
+/* ツールチップ（docs/SPEC.md §1.8） */
+.tooltip {
+  position: fixed;
+  z-index: 50;
+  max-width: 320px;
+  font-size: 12px;
+  line-height: 16px;
+  pointer-events: none;
+  white-space: nowrap;
+}
+
+.tooltip-a {
+  padding: 1px 8px 2px;
+  background: var(--tooltip-bg);
+  border: 1.6px solid var(--tooltip-border);
+}
+
+.tooltip-b {
+  max-width: 190px;
+  padding: 7px 8px 8px;
+  white-space: normal;
+  font-weight: 600;
+  background: var(--tooltip-b-bg);
+  border: 1px solid var(--menu-border);
+  border-radius: 4px;
+  box-shadow: 0 4px 8px rgba(0, 0, 0, 0.26);
+}
+
 /* 保存オプションのメニュー */
 .menu {
   position: absolute;
@@ -494,11 +529,15 @@ select.field option {
   font-variant-numeric: tabular-nums;
 }
 
+.editor {
+  --ruler-width: min(680px, calc(100vw - 32px));
+}
+
 .ruler {
   position: absolute;
   left: 50%;
   bottom: 62px;
-  width: var(--ruler-width, 680px);
+  width: var(--ruler-width);
   height: 28px;
   transform: translateX(-50%);
   touch-action: none;
@@ -514,7 +553,7 @@ select.field option {
   position: absolute;
   left: 50%;
   bottom: 12px;
-  width: var(--ruler-width, 680px);
+  width: var(--ruler-width);
   height: 32px;
   transform: translateX(-50%);
   display: flex;
@@ -615,6 +654,20 @@ select.field option {
 
 .ratio-done:hover {
   background: var(--hover);
+}
+
+/* 狭い画面（スマホなど）：ツールバーを 2 段にする（Web 版独自） */
+.editor.compact .toolbar {
+  height: 100px;
+}
+
+.editor.compact .tool-group {
+  left: 8px;
+}
+
+.editor.compact .actions {
+  top: 60px;
+  right: 8px;
 }
 
 [hidden] {

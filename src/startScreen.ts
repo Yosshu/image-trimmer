@@ -27,6 +27,7 @@ export class StartScreen {
         }),
         open,
         this.error,
+        h('p', { class: 'start-note', text: '画像はブラウザの中だけで処理され、どこにも送信されません' }),
         this.input,
       ]),
     ]);
